@@ -53,8 +53,26 @@ class AbstractUNet(nn.Module):
         upsample="default",
         dropout_prob=0.1,
         is3d=True,
+        condition_channels: int = 0,
+        condition_embedding_dim: int | None = None,
+        condition_mode: str = "concat",
     ):
         super().__init__()
+
+        self.condition_channels = condition_channels
+        self.condition_embedding_dim = condition_embedding_dim or condition_channels
+        self.condition_mode = condition_mode
+        self.condition_encoder = None
+
+        if self.condition_channels:
+            assert self.condition_mode in ["concat", "add"], "condition_mode must be 'concat' or 'add'"
+            embed_dim = self.condition_embedding_dim
+            assert embed_dim is not None and embed_dim > 0, "condition_embedding_dim must be > 0 when using conditions"
+            self.condition_embedding_dim = embed_dim
+            self.condition_encoder = nn.Sequential(nn.Linear(self.condition_channels, embed_dim), nn.ReLU(inplace=True))
+            effective_in_channels = in_channels + embed_dim if self.condition_mode == "concat" else in_channels
+        else:
+            effective_in_channels = in_channels
 
         if isinstance(f_maps, int):
             f_maps = number_of_features_per_level(f_maps, num_levels=num_levels)
@@ -66,7 +84,7 @@ class AbstractUNet(nn.Module):
 
         # create encoder path
         self.encoders = create_encoders(
-            in_channels,
+            effective_in_channels,
             f_maps,
             basic_module,
             conv_kernel_size,
@@ -100,7 +118,7 @@ class AbstractUNet(nn.Module):
             # regression problem
             self.final_activation = None
 
-    def forward(self, x, return_logits=False):
+    def forward(self, x, condition=None, return_logits=False):
         """
         Forward pass through the network.
 
@@ -115,10 +133,31 @@ class AbstractUNet(nn.Module):
             torch.Tensor: The output tensor after passing through the network.
                           If return_logits is True, returns a tuple of (output, logits).
         """
+        x = self._inject_condition(x, condition)
         output, logits = self._forward_logits(x)
         if return_logits:
             return output, logits
         return output
+
+    def _inject_condition(self, x, condition):
+        if condition is None or self.condition_channels == 0:
+            return x
+
+        if condition.dim() == x.dim():
+            condition_map = condition
+        elif condition.dim() == 2:
+            assert self.condition_encoder is not None, "Condition encoder must be defined for vector conditions"
+            condition_embedding = self.condition_encoder(condition)
+            view_shape = [condition_embedding.shape[0], condition_embedding.shape[1]] + [1] * (x.dim() - 2)
+            condition_map = condition_embedding.view(*view_shape)
+            condition_map = condition_map.expand(-1, -1, *x.shape[2:])
+        else:
+            raise ValueError("Condition must be either a spatial map or a (batch, C) vector")
+
+        if self.condition_mode == "concat":
+            return torch.cat([x, condition_map], dim=1)
+
+        return x + condition_map
 
     def _forward_logits(self, x):
         # encoder part
@@ -170,6 +209,9 @@ class UNet3D(AbstractUNet):
         conv_upscale=2,
         upsample="default",
         dropout_prob=0.1,
+        condition_channels: int = 0,
+        condition_embedding_dim: int | None = None,
+        condition_mode: str = "concat",
         **kwargs,
     ):
         super().__init__(
@@ -187,6 +229,9 @@ class UNet3D(AbstractUNet):
             upsample=upsample,
             dropout_prob=dropout_prob,
             is3d=True,
+            condition_channels=condition_channels,
+            condition_embedding_dim=condition_embedding_dim,
+            condition_mode=condition_mode,
         )
 
 
@@ -214,6 +259,9 @@ class ResidualUNet3D(AbstractUNet):
         conv_upscale=2,
         upsample="default",
         dropout_prob=0.1,
+        condition_channels: int = 0,
+        condition_embedding_dim: int | None = None,
+        condition_mode: str = "concat",
         **kwargs,
     ):
         super().__init__(
@@ -231,6 +279,9 @@ class ResidualUNet3D(AbstractUNet):
             upsample=upsample,
             dropout_prob=dropout_prob,
             is3d=True,
+            condition_channels=condition_channels,
+            condition_embedding_dim=condition_embedding_dim,
+            condition_mode=condition_mode,
         )
 
 
@@ -258,6 +309,9 @@ class ResidualUNetSE3D(AbstractUNet):
         conv_upscale=2,
         upsample="default",
         dropout_prob=0.1,
+        condition_channels: int = 0,
+        condition_embedding_dim: int | None = None,
+        condition_mode: str = "concat",
         **kwargs,
     ):
         super().__init__(
@@ -275,6 +329,9 @@ class ResidualUNetSE3D(AbstractUNet):
             upsample=upsample,
             dropout_prob=dropout_prob,
             is3d=True,
+            condition_channels=condition_channels,
+            condition_embedding_dim=condition_embedding_dim,
+            condition_mode=condition_mode,
         )
 
 
@@ -298,6 +355,9 @@ class UNet2D(AbstractUNet):
         conv_upscale=2,
         upsample="default",
         dropout_prob=0.1,
+        condition_channels: int = 0,
+        condition_embedding_dim: int | None = None,
+        condition_mode: str = "concat",
         **kwargs,
     ):
         super().__init__(
@@ -315,6 +375,9 @@ class UNet2D(AbstractUNet):
             upsample=upsample,
             dropout_prob=dropout_prob,
             is3d=False,
+            condition_channels=condition_channels,
+            condition_embedding_dim=condition_embedding_dim,
+            condition_mode=condition_mode,
         )
 
 
@@ -338,6 +401,9 @@ class ResidualUNet2D(AbstractUNet):
         conv_upscale=2,
         upsample="default",
         dropout_prob=0.1,
+        condition_channels: int = 0,
+        condition_embedding_dim: int | None = None,
+        condition_mode: str = "concat",
         **kwargs,
     ):
         super().__init__(
@@ -355,6 +421,9 @@ class ResidualUNet2D(AbstractUNet):
             upsample=upsample,
             dropout_prob=dropout_prob,
             is3d=False,
+            condition_channels=condition_channels,
+            condition_embedding_dim=condition_embedding_dim,
+            condition_mode=condition_mode,
         )
 
 
