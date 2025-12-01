@@ -75,6 +75,31 @@ One can also install directly from source, i.e. go to the checkout directory and
 pip install -e .
 ```
 
+### Super-resolution and conditional inputs
+
+The network now supports flexible channel configurations for 3D super-resolution tasks. Set arbitrary
+`in_channels` and `out_channels` in the `model` section of your YAML config to control the volume resolutions
+you wish to map (e.g., 10 Å multi-slice ptycho inputs to 2.5 Å outputs).
+
+For optional material-aware conditioning, store an additional dataset in your HDF5 files (such as element
+one-hot volumes) and reference it from the dataset configuration:
+
+```yaml
+dataset:
+  condition_internal_path: condition
+
+model:
+  name: UNet3D
+  in_channels: 1
+  out_channels: 1
+  condition_channels: 4            # number of material condition channels or vector length
+  condition_embedding_dim: 8       # optional embedding dimension for vector conditions
+  condition_mode: concat           # either 'concat' (default) or 'add'
+```
+
+Vector conditions shaped `(batch, condition_channels)` are embedded and broadcast over the spatial grid, while
+full spatial condition maps can be provided directly.
+
 ### Installation tips
 PyTorch package comes with their own CUDA runtime libraries, so you don't need to install CUDA separately on your system.
 However, you must ensure that the PyTorch/CUDA version you choose is compatible with your GPU’s compute capability. 

@@ -62,6 +62,7 @@ class AbstractHDF5Dataset(ConfigDataset):
         transformer_config: dict,
         raw_internal_path: str = "raw",
         label_internal_path: str = "label",
+        condition_internal_path: str | None = None,
         global_normalization: bool = False,
         random_scale: int | None = None,
         random_scale_probability: float = 0.5,
@@ -72,6 +73,7 @@ class AbstractHDF5Dataset(ConfigDataset):
         self.file_path = file_path
         self.raw_internal_path = raw_internal_path
         self.label_internal_path = label_internal_path
+        self.condition_internal_path = condition_internal_path
 
         self.halo_shape = tuple(slice_builder_config.get("halo_shape", [0, 0, 0]))
 
@@ -85,6 +87,7 @@ class AbstractHDF5Dataset(ConfigDataset):
 
         self.transformer = transforms.Transformer(transformer_config, stats)
         self.raw_transform = self.transformer.raw_transform()
+        self.condition_transform = self.raw_transform
 
         if phase != "test":
             # create label transform only in train/val phase
@@ -107,12 +110,18 @@ class AbstractHDF5Dataset(ConfigDataset):
             else:
                 self.volume_shape = raw.shape[1:]
             label = f[label_internal_path] if phase != "test" else None
+            condition = f[condition_internal_path] if condition_internal_path else None
             # check that raw and label shapes match
             if label is not None:
                 if label.ndim == 3:
                     assert label.shape == self.volume_shape, "Raw and label shapes do not match"
                 else:
                     assert label.shape[1:] == self.volume_shape, "Raw and label shapes do not match"
+            if condition is not None:
+                if condition.ndim == 3:
+                    assert condition.shape == self.volume_shape, "Raw and condition shapes do not match"
+                else:
+                    assert condition.shape[1:] == self.volume_shape, "Raw and condition shapes do not match"
 
             logger.info(f"Volume shape: {self.volume_shape}. Creating slices...")
             # build slice indices for raw and label data sets
@@ -168,8 +177,14 @@ class AbstractHDF5Dataset(ConfigDataset):
             # use halo padding in the 'test' phase to avoid edge artifacts
             padded_patch = self.get_raw_padded_patch(raw_idx_padded)
             raw_patch_transformed = self.raw_transform(padded_patch)
+            condition_patch = None
+            if self.condition_internal_path:
+                padded_condition = self.get_condition_padded_patch(raw_idx_padded)
+                condition_patch = self.condition_transform(padded_condition)
             # return padded patch, and the original (non-padded) index for placing the prediction back into the volume
             # predictor is responsible for removing the halo from the prediction
+            if condition_patch is not None:
+                return raw_patch_transformed, raw_idx, condition_patch
             return raw_patch_transformed, raw_idx
         else:
             label_idx = self.label_slices[idx]
@@ -180,13 +195,27 @@ class AbstractHDF5Dataset(ConfigDataset):
 
             raw_patch_transformed = self.raw_transform(self.get_raw_patch(raw_idx))
             label_patch_transformed = self.label_transform(self.get_label_patch(label_idx))
+            condition_patch_transformed = None
+            if self.condition_internal_path:
+                condition_patch_transformed = self.condition_transform(self.get_condition_patch(raw_idx))
 
             if self.random_scaler is not None:
                 # scale patches back to the original patch size
-                raw_patch_transformed, label_patch_transformed = self.random_scaler.rescale_patches(
-                    raw_patch_transformed, label_patch_transformed
-                )
+                if condition_patch_transformed is None:
+                    raw_patch_transformed, label_patch_transformed = self.random_scaler.rescale_patches(
+                        raw_patch_transformed, label_patch_transformed
+                    )
+                else:
+                    (
+                        raw_patch_transformed,
+                        label_patch_transformed,
+                        condition_patch_transformed,
+                    ) = self.random_scaler.rescale_patches(
+                        raw_patch_transformed, label_patch_transformed, condition_patch_transformed
+                    )
             # return the transformed raw and label patches
+            if condition_patch_transformed is not None:
+                return raw_patch_transformed, label_patch_transformed, condition_patch_transformed
             return raw_patch_transformed, label_patch_transformed
 
     def __len__(self) -> int:
@@ -215,6 +244,7 @@ class AbstractHDF5Dataset(ConfigDataset):
                 transformer_config=transformer_config,
                 raw_internal_path=dataset_config.get("raw_internal_path", "raw"),
                 label_internal_path=dataset_config.get("label_internal_path", "label"),
+                condition_internal_path=dataset_config.get("condition_internal_path", None),
                 global_normalization=dataset_config.get("global_normalization", False),
                 random_scale=dataset_config.get("random_scale", None),
                 random_scale_probability=dataset_config.get("random_scale_probability", 0.5),
@@ -234,6 +264,7 @@ class StandardHDF5Dataset(AbstractHDF5Dataset):
         transformer_config: dict,
         raw_internal_path: str = "raw",
         label_internal_path: str = "label",
+        condition_internal_path: str | None = None,
         global_normalization: bool = False,
         random_scale: int = None,
         random_scale_probability: float = 0.5,
@@ -245,6 +276,7 @@ class StandardHDF5Dataset(AbstractHDF5Dataset):
             transformer_config=transformer_config,
             raw_internal_path=raw_internal_path,
             label_internal_path=label_internal_path,
+            condition_internal_path=condition_internal_path,
             global_normalization=global_normalization,
             random_scale=random_scale,
             random_scale_probability=random_scale_probability,
@@ -252,6 +284,8 @@ class StandardHDF5Dataset(AbstractHDF5Dataset):
         self._raw = None
         self._raw_padded = None
         self._label = None
+        self._condition = None
+        self._condition_padded = None
 
     def get_raw_patch(self, idx):
         # load lazily on the first request
@@ -270,12 +304,34 @@ class StandardHDF5Dataset(AbstractHDF5Dataset):
                 self._label = f[self.label_internal_path][:]
         return self._label[idx]
 
+    def get_condition_patch(self, idx):
+        if self.condition_internal_path is None:
+            raise RuntimeError("Condition data not configured for this dataset")
+        if self._condition is None:
+            with h5py.File(self.file_path, "r") as f:
+                assert self.condition_internal_path in f, (
+                    f"Dataset {self.condition_internal_path} not found in {self.file_path}"
+                )
+                self._condition = f[self.condition_internal_path][:]
+        return self._condition[idx]
+
     def get_raw_padded_patch(self, idx):
         if self._raw_padded is None:
             with h5py.File(self.file_path, "r") as f:
                 assert self.raw_internal_path in f, f"Dataset {self.raw_internal_path} not found in {self.file_path}"
                 self._raw_padded = mirror_pad(f[self.raw_internal_path][:], self.halo_shape)
         return self._raw_padded[idx]
+
+    def get_condition_padded_patch(self, idx):
+        if self.condition_internal_path is None:
+            raise RuntimeError("Condition data not configured for this dataset")
+        if self._condition_padded is None:
+            with h5py.File(self.file_path, "r") as f:
+                assert self.condition_internal_path in f, (
+                    f"Dataset {self.condition_internal_path} not found in {self.file_path}"
+                )
+                self._condition_padded = mirror_pad(f[self.condition_internal_path][:], self.halo_shape)
+        return self._condition_padded[idx]
 
     def is_lazy(self) -> bool:
         return False
@@ -294,6 +350,7 @@ class LazyHDF5Dataset(AbstractHDF5Dataset):
         transformer_config: dict,
         raw_internal_path: str = "raw",
         label_internal_path: str = "label",
+        condition_internal_path: str | None = None,
         global_normalization: bool = False,
         random_scale: int = None,
         random_scale_probability: float = 0.5,
@@ -305,6 +362,7 @@ class LazyHDF5Dataset(AbstractHDF5Dataset):
             transformer_config=transformer_config,
             raw_internal_path=raw_internal_path,
             label_internal_path=label_internal_path,
+            condition_internal_path=condition_internal_path,
             global_normalization=global_normalization,
             random_scale=random_scale,
             random_scale_probability=random_scale_probability,
@@ -320,6 +378,12 @@ class LazyHDF5Dataset(AbstractHDF5Dataset):
         with h5py.File(self.file_path, "r") as f:
             return f[self.label_internal_path][idx]
 
+    def get_condition_patch(self, idx: int) -> np.ndarray:
+        if self.condition_internal_path is None:
+            raise RuntimeError("Condition data not configured for this dataset")
+        with h5py.File(self.file_path, "r") as f:
+            return f[self.condition_internal_path][idx]
+
     def get_raw_padded_patch(self, idx: int) -> np.ndarray:
         with h5py.File(self.file_path, "r+") as f:
             if "raw_padded" in f:
@@ -330,6 +394,19 @@ class LazyHDF5Dataset(AbstractHDF5Dataset):
             raw_padded = mirror_pad(raw, self.halo_shape)
             f.create_dataset("raw_padded", data=raw_padded, compression="gzip")
             return raw_padded[idx]
+
+    def get_condition_padded_patch(self, idx: int) -> np.ndarray:
+        if self.condition_internal_path is None:
+            raise RuntimeError("Condition data not configured for this dataset")
+        with h5py.File(self.file_path, "r+") as f:
+            dataset_name = f"{self.condition_internal_path}_padded"
+            if dataset_name in f:
+                return f[dataset_name][idx]
+
+            condition = f[self.condition_internal_path][:]
+            condition_padded = mirror_pad(condition, self.halo_shape)
+            f.create_dataset(dataset_name, data=condition_padded, compression="gzip")
+            return condition_padded[idx]
 
     def is_lazy(self) -> bool:
         return True

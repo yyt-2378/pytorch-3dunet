@@ -70,7 +70,9 @@ class RandomScaler:
 
         return raw_idx, label_idx
 
-    def rescale_patches(self, raw_patch: torch.Tensor, label_patch: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def rescale_patches(
+        self, raw_patch: torch.Tensor, label_patch: torch.Tensor, condition_patch: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # compute zoom factors
         if raw_patch.ndim == 4:
             raw_shape = raw_patch.shape[1:]
@@ -79,7 +81,9 @@ class RandomScaler:
 
         # if raw_shape equal to self.patch_shape just return the patches
         if raw_shape == self.patch_shape:
-            return raw_patch, label_patch
+            if condition_patch is None:
+                return raw_patch, label_patch
+            return raw_patch, label_patch, condition_patch
 
         # rescale patches back to the original shape
         if raw_patch.ndim == 4:
@@ -124,7 +128,27 @@ class RandomScaler:
             else:
                 label_patch = label_patch.int()
 
+        if condition_patch is not None:
+            condition_patch = self._interpolate_condition(condition_patch)
+            return raw_patch, label_patch, condition_patch
+
         return raw_patch, label_patch
+
+    def _interpolate_condition(self, condition_patch: torch.Tensor) -> torch.Tensor:
+        remove_dims = 0
+        if condition_patch.ndim == 3:
+            condition_patch = condition_patch.unsqueeze(0).unsqueeze(0)
+            remove_dims = 2
+        elif condition_patch.ndim == 4:
+            condition_patch = condition_patch.unsqueeze(0)
+            remove_dims = 1
+
+        condition_patch = interpolate(condition_patch, self.patch_shape, mode="trilinear")
+
+        for _ in range(remove_dims):
+            condition_patch = condition_patch.squeeze(0)
+
+        return condition_patch
 
     def _apply_offsets(self, idx: tuple, offsets: list, is_start: bool) -> tuple:
         if len(idx) == 4:

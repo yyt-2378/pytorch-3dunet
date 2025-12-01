@@ -145,22 +145,31 @@ class StandardPredictor(AbstractPredictor):
             logger.info(f"Running inference on {len(test_loader)} batches")
             # Run predictions on the entire input dataset
             with torch.no_grad():
-                for input, indices in tqdm(test_loader):
+                for batch in tqdm(test_loader):
+                    if len(batch) == 3:
+                        input, indices, condition = batch
+                    else:
+                        input, indices = batch
+                        condition = None
                     # send batch to device
                     # generally this is an effective choice for enhancing transfer speed,
                     # see: https://docs.pytorch.org/tutorials/intermediate/pinmem_nonblock.html
                     input = input.to(self.device, non_blocking=True)
+                    if condition is not None:
+                        condition = condition.to(self.device, non_blocking=True)
 
                     if is_model_2d(self.model):
                         # remove the singleton z-dimension from the input
                         input = torch.squeeze(input, dim=-3)
+                        if condition is not None and condition.ndim == input.ndim + 1:
+                            condition = torch.squeeze(condition, dim=-3)
                         # forward pass
-                        prediction = self.model(input)
+                        prediction = self.model(input, condition=condition)
                         # add the singleton z-dimension to the output
                         prediction = torch.unsqueeze(prediction, dim=-3)
                     else:
                         # forward pass
-                        prediction = self.model(input)
+                        prediction = self.model(input, condition=condition)
 
                     # unpad the predicted patch
                     if sum(patch_halo) > 0:
