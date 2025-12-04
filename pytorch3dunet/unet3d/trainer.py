@@ -83,7 +83,7 @@ def create_trainer(config: dict) -> "UNetTrainer":
     )
 
 
-def _split_and_move_to_device(t: Any, device: TorchDevice) -> tuple[torch.Tensor, torch.Tensor]:
+def _split_and_move_to_device(t: Any, device: TorchDevice) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     def _move_to_device(input, device):
         if isinstance(input, tuple | list):
             return tuple([_move_to_device(x, device) for x in input])
@@ -91,8 +91,13 @@ def _split_and_move_to_device(t: Any, device: TorchDevice) -> tuple[torch.Tensor
             # send batch to device, see: https://docs.pytorch.org/tutorials/intermediate/pinmem_nonblock.html
             return input.to(device, non_blocking=True)
 
-    input, target = _move_to_device(t, device)
-    return input, target
+    moved = _move_to_device(t, device)
+
+    if isinstance(moved, tuple | list) and len(moved) == 3:
+        return moved[0], moved[1], moved[2]
+
+    input, target = moved
+    return input, target, None
 
 
 class UNetTrainer:
@@ -234,9 +239,9 @@ class UNetTrainer:
                 f"Epoch [{self.num_epochs}/{self.max_num_epochs - 1}]"
             )
 
-            input, target = _split_and_move_to_device(t, self.device)
+            input, target, condition = _split_and_move_to_device(t, self.device)
 
-            output, loss = self._forward_pass(input, target)
+            output, loss = self._forward_pass(input, target, condition)
 
             train_losses.update(loss.item(), self._batch_size(input))
 
@@ -323,9 +328,9 @@ class UNetTrainer:
 
             images_for_logging = []
             for i, t in enumerate(tqdm(self.loaders["val"])):
-                input, target = _split_and_move_to_device(t, self.device)
+                input, target, condition = _split_and_move_to_device(t, self.device)
 
-                output, loss = self._forward_pass(input, target)
+                output, loss = self._forward_pass(input, target, condition)
                 val_losses.update(loss.item(), self._batch_size(input))
                 eval_score = self.eval_criterion(output, target)
                 val_scores.update(eval_score.item(), self._batch_size(input))
@@ -348,18 +353,22 @@ class UNetTrainer:
             self._log_stats("val", val_losses.avg, val_scores.avg)
             return val_scores.avg
 
-    def _forward_pass(self, inp: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _forward_pass(
+        self, inp: torch.Tensor, target: torch.Tensor, condition: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if is_model_2d(self.model):
             # remove the singleton z-dimension from the input
             inp = torch.squeeze(inp, dim=-3)
+            if condition is not None and condition.ndim == inp.ndim + 1:
+                condition = torch.squeeze(condition, dim=-3)
             # forward pass
-            output, logits = self.model(inp, return_logits=True)
+            output, logits = self.model(inp, condition=condition, return_logits=True)
             # add the singleton z-dimension to the output
             output = torch.unsqueeze(output, dim=-3)
             logits = torch.unsqueeze(logits, dim=-3)
         else:
             # forward pass
-            output, logits = self.model(inp, return_logits=True)
+            output, logits = self.model(inp, condition=condition, return_logits=True)
 
         # always compute the loss using logits
         loss = self.loss_criterion(logits, target)

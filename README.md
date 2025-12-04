@@ -75,6 +75,74 @@ One can also install directly from source, i.e. go to the checkout directory and
 pip install -e .
 ```
 
+### Super-resolution and conditional inputs
+
+The network now supports flexible channel configurations for 3D super-resolution tasks. Set arbitrary
+`in_channels` and `out_channels` in the `model` section of your YAML config to control the volume resolutions
+you wish to map (e.g., 10 Å multi-slice ptycho inputs to 2.5 Å outputs).
+
+For optional material-aware conditioning, store an additional dataset in your HDF5 files (such as element
+one-hot volumes) and reference it from the dataset configuration:
+
+```yaml
+dataset:
+  condition_internal_path: condition
+
+model:
+  name: UNet3D
+  in_channels: 1
+  out_channels: 1
+  condition_channels: 4            # number of material condition channels or vector length
+  condition_embedding_dim: 8       # optional embedding dimension for vector conditions
+  condition_mode: concat           # either 'concat' (default) or 'add'
+```
+
+Vector conditions shaped `(batch, condition_channels)` are embedded and broadcast over the spatial grid, while
+full spatial condition maps can be provided directly.
+
+#### Preparing HDF5 data with optional condition channels
+
+For super-resolution you still provide paired `raw`/`label` volumes, but you can additionally store material-aware
+condition channels in the same HDF5 file. The shapes for each dataset must share the same spatial dimensions:
+
+- `raw`: `(C_in, Z, Y, X)` (or `(Z, Y, X)` for single-channel)
+- `label`: `(C_out, Z, Y, X)`
+- `condition` (optional): `(K, Z, Y, X)` where `K` is the number of condition channels (e.g., Ga/Sr masks)
+
+A tiny script is provided to build a toy file with all three datasets:
+
+```bash
+python resources/superres_condition_example/prepare_superres_condition_h5.py \
+  --output toy_superres_condition.h5 \
+  --depth 16 --height 48 --width 48
+```
+
+This writes `raw`, `label`, and `condition` datasets with matching spatial shapes. The example condition maps are
+simple one-hot element masks for `Ga`, `Sr`, `O`, and a `Vacancy` channel so you can see how conditioning flows through
+the pipeline.
+
+Example training config using the generated file:
+
+```yaml
+dataset:
+  file_paths: [toy_superres_condition.h5]
+  condition_internal_path: condition
+  slice_builder:
+    name: SliceBuilder
+    patch_shape: [16, 32, 32]
+    stride_shape: [8, 16, 16]
+
+model:
+  name: UNet3D
+  in_channels: 1            # raw channels
+  out_channels: 1           # label channels
+  condition_channels: 4     # matches the example Ga/Sr/O/Vacancy masks
+  condition_mode: concat
+```
+
+You can swap in your own condition maps (e.g., per-element segmentation, density, or phase indicators) as long as they
+match the spatial size of `raw`/`label`.
+
 ### Installation tips
 PyTorch package comes with their own CUDA runtime libraries, so you don't need to install CUDA separately on your system.
 However, you must ensure that the PyTorch/CUDA version you choose is compatible with your GPU’s compute capability. 
